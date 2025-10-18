@@ -56,8 +56,8 @@ const transporter = nodemailer.createTransport({
   auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
 });
 
-// --- FUNCIONES DE AYUDA COMPLETAS ---
-
+// --- FUNCIONES DE AYUDA ---
+// (Aquí van todas tus funciones: enviarMensaje, enviarEmail, etc. No se modifican)
 function enviarMensaje(to, body) {
   if (!body || body.trim() === "") {
     console.log("Se intentó enviar un mensaje vacío. Abortando.");
@@ -87,7 +87,6 @@ function normalizarTexto(texto) {
 
 const palabrasSaludo = ["hola", "saludos", "viejo Hugo", "buen dia", "buenas", "buenas tardes", "buenas noches", "buenos dias"];
 
-// MODIFICADO: La función ahora acepta el nombre de la persona para personalizar el saludo.
 function obtenerSaludo(pushname) {
   const hora = new Date().toLocaleString("es-CO", { timeZone: "America/Bogota", hour: "2-digit", hour12: false });
   let saludoBase;
@@ -98,7 +97,6 @@ function obtenerSaludo(pushname) {
   } else {
     saludoBase = "¡Buenas noches";
   }
-  // Si tenemos un nombre, lo añadimos. Si no, devolvemos el saludo genérico.
   return pushname && pushname !== 'Desconocido' ? `${saludoBase}, ${pushname}!` : `${saludoBase}!`;
 }
 
@@ -156,16 +154,40 @@ function consultarIA_via_WhatsApp(userMessage, originalFrom, pushname, conversat
     }
 }
 
-// --- WEBHOOK ---
+// --- WEBHOOKS ---
+
+// === NUEVO: Endpoint para la verificación de Meta (GET) ===
+app.get("/webhook", (req, res) => {
+  console.log("Recibida solicitud de verificación de webhook (GET)...");
+
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+
+  // El VERIFY_TOKEN es la clave secreta que pones en Render y en el panel de Meta.
+  const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+
+  // Comprueba que el modo y el token son correctos.
+  if (mode && token) {
+    if (mode === "subscribe" && token === VERIFY_TOKEN) {
+      console.log("VERIFICACIÓN DE WEBHOOK EXITOSA.");
+      res.status(200).send(challenge);
+    } else {
+      // Si no coinciden, responde con '403 Forbidden'
+      console.log("VERIFICACIÓN DE WEBHOOK FALLIDA. Tokens no coinciden.");
+      res.sendStatus(403);
+    }
+  }
+});
+
+// === Endpoint para recibir mensajes (POST) - TU CÓDIGO ORIGINAL ===
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
     if (body.event_type === "message_received" && body.data) {
-
       if (body.data.fromMe) {
         return res.status(200).send("EVENT_RECEIVED_AND_IGNORED");
       }
-
       const originalMessage = body.data.body || '';
       const from = body.data.from || '';
       const pushname = body.data.pushname || 'Desconocido';
@@ -178,16 +200,13 @@ app.post("/webhook", async (req, res) => {
           console.log(`Respuesta recibida de la IA: "${originalMessage}"`);
           if (isAwaitingAIReply && pendingQueryInfo) {
               const { from: originalFrom, pushname: originalPushname } = pendingQueryInfo;
-              
               const responseWithSignature = `*Para ${originalPushname}:*\n${originalMessage}`;
               enviarMensaje(originalFrom, responseWithSignature);
-
               const contextKey = `${originalFrom}_${originalPushname}`;
               conversationContext[contextKey] = {
                   lastMessage: originalMessage,
                   timestamp: Date.now()
               };
-
               isAwaitingAIReply = false;
               pendingQueryInfo = null;
               console.log(`IA ahora está 'disponible'. Contexto guardado para ${originalPushname} en ${originalFrom}.`);
@@ -207,30 +226,25 @@ app.post("/webhook", async (req, res) => {
       const contextKey = `${from}_${pushname}`;
 
       if ((isGroup && gruposPermitidos.includes(from)) || !isGroup) {
-        
         if (conversationContext[contextKey] && (Date.now() - conversationContext[contextKey].timestamp < CONTEXT_TIMEOUT)) {
             console.log(`Lógica: Detectada continuación de conversación de ${pushname} para IA.`);
             const history = `Mi última respuesta a ${pushname} fue: "${conversationContext[contextKey].lastMessage}"`;
             delete conversationContext[contextKey]; 
             consultarIA_via_WhatsApp(originalMessage, from, pushname, history);
-        
         } else if (respuestaEspecifica) {
             console.log("Lógica: Coincidencia con diccionario encontrada.");
             enviarMensaje(from, respuestaEspecifica);
             if (isGroup) {
                 enviarEmail("hugo.romero@claro.com.co", `Reporte de '${originalMessage}'`, `Mensaje de ${pushname} en ${from}: ${originalMessage}`);
             }
-        
         } else if (fueMencionado) {
             console.log(`Lógica: Mención para IA detectada de ${pushname}.`);
             if (isGroup) {
                 enviarEmail("hugo.romero@claro.com.co", `Mención para IA en ${from}`, `Mensaje de ${pushname}: ${originalMessage}`);
             }
             consultarIA_via_WhatsApp(originalMessage, from, pushname);
-        
         } else if (esUnSaludoSimple && puedeSaludar(from, pushname)) {
             console.log("Lógica: Saludo simple y personalizado detectado.");
-            // MODIFICADO: Se pasa el 'pushname' para personalizar el saludo.
             enviarMensaje(from, obtenerSaludo(pushname));
         }
       }
