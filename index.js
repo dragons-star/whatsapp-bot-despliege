@@ -57,7 +57,6 @@ const transporter = nodemailer.createTransport({
 });
 
 // --- FUNCIONES DE AYUDA ---
-// (Aquí van todas tus funciones: enviarMensaje, enviarEmail, etc. No se modifican)
 function enviarMensaje(to, body) {
   if (!body || body.trim() === "") {
     console.log("Se intentó enviar un mensaje vacío. Abortando.");
@@ -156,7 +155,7 @@ function consultarIA_via_WhatsApp(userMessage, originalFrom, pushname, conversat
 
 // --- WEBHOOKS ---
 
-// === NUEVO: Endpoint para la verificación de Meta (GET) ===
+// === Endpoint para la verificación de Meta (GET) ===
 app.get("/webhook", (req, res) => {
   console.log("Recibida solicitud de verificación de webhook (GET)...");
 
@@ -164,12 +163,12 @@ app.get("/webhook", (req, res) => {
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
 
-  // El VERIFY_TOKEN es la clave secreta que pones en Render y en el panel de Meta.
-  const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+  // === MODIFICADO: Usa la nueva variable de entorno META_VERIFY_TOKEN ===
+  const MY_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN;
 
   // Comprueba que el modo y el token son correctos.
   if (mode && token) {
-    if (mode === "subscribe" && token === VERIFY_TOKEN) {
+    if (mode === "subscribe" && token === MY_VERIFY_TOKEN) {
       console.log("VERIFICACIÓN DE WEBHOOK EXITOSA.");
       res.status(200).send(challenge);
     } else {
@@ -177,10 +176,14 @@ app.get("/webhook", (req, res) => {
       console.log("VERIFICACIÓN DE WEBHOOK FALLIDA. Tokens no coinciden.");
       res.sendStatus(403);
     }
+  } else {
+    // Si falta algún parámetro, también falla.
+    console.log("VERIFICACIÓN FALLIDA: Faltan parámetros en la solicitud.");
+    res.sendStatus(400); // Bad Request
   }
 });
 
-// === Endpoint para recibir mensajes (POST) - TU CÓDIGO ORIGINAL ===
+// === Endpoint para recibir mensajes (POST) - Sin cambios ===
 app.post("/webhook", async (req, res) => {
   try {
     const body = req.body;
