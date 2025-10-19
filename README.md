@@ -7,3 +7,4 @@ Este es el repositorio para un bot de Whatsapp.
 2. Ejecutar `npm install`.
 3. Configurar el archivo `.env`.
 4. Ejecutar `node index.js`.
+"# whatsapp-bot2-despliegue" 
