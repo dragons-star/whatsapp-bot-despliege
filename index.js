@@ -1,21 +1,29 @@
 require("dotenv").config();
-const express = require("express");
-const bodyParser = require("body-parser");
-const axios = require("axios");
+const qrcode = require('qrcode-terminal');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const nodemailer = require("nodemailer");
 
-const app = express();
-app.use(bodyParser.json());
+console.log("Iniciando el bot...");
 
-// --- Lógica de Cola Única y CONTEXTO AVANZADO para la IA ---
+// --- Configuración del Cliente de WhatsApp ---
+// Usamos LocalAuth para guardar la sesión y no tener que escanear el QR cada vez.
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: {
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox'] // Argumentos necesarios para funcionar en Render
+    }
+});
+
+// --- Lógica de Cola Única y CONTEXTO AVANZADO para la IA (Sin cambios) ---
 let isAwaitingAIReply = false;
 let pendingQueryInfo = null;
-let conversationContext = {}; // Memoria para seguir conversaciones por persona
-const CONTEXT_TIMEOUT = 3 * 60 * 1000; // 3 minutos de memoria
+let conversationContext = {}; 
+const CONTEXT_TIMEOUT = 3 * 60 * 1000;
 
-// --- Diccionarios y Listas de Configuración ---
+// --- Diccionarios y Listas de Configuración (Sin cambios) ---
 let lastGreetingTime = {};
-const COOLDOWN_PERIOD_MS = 60 * 60 * 1000; // 1 hora
+const COOLDOWN_PERIOD_MS = 60 * 60 * 1000; 
 
 const gruposPermitidos = [
   "573124138249-1633615578@g.us",
@@ -25,7 +33,7 @@ const gruposPermitidos = [
   "1410194235@g.us",
   "120363043316977258@g.us",
   "120363042095724140@g.us",
-  "120363420822895904@g.us" // Grupo de pruebas
+  "120363420822895904@g.us"
 ];
 
 const respuestasPorGrupo = {
@@ -56,20 +64,121 @@ const transporter = nodemailer.createTransport({
   auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS },
 });
 
-// --- FUNCIONES DE AYUDA COMPLETAS ---
+// --- Eventos del Cliente de WhatsApp ---
 
-function enviarMensaje(to, body) {
-  if (!body || body.trim() === "") {
-    console.log("Se intentó enviar un mensaje vacío. Abortando.");
-    return;
-  }
-  axios.post(process.env.ULTRAMSG_URL, {
-      token: process.env.ULTRAMSG_TOKEN,
-      to: to,
-      body: body,
-    })
-    .then(response => console.log("Mensaje enviado: ", response.data))
-    .catch(error => console.error("Error enviando mensaje: ", error));
+// 1. Se genera el QR para iniciar sesión
+client.on('qr', qr => {
+    console.log("¡Se generó un código QR! Escanéalo con tu teléfono desde WhatsApp > Dispositivos Vinculados.");
+    qrcode.generate(qr, { small: true });
+});
+
+// 2. La autenticación fue exitosa
+client.on('authenticated', () => {
+    console.log('Autenticación exitosa.');
+});
+
+// 3. El bot está listo para recibir y enviar mensajes
+client.on('ready', () => {
+    console.log('¡Cliente de WhatsApp listo y conectado!');
+});
+
+// 4. Se recibe un mensaje nuevo
+client.on('message', async message => {
+    // Ignoramos nuestros propios mensajes
+    if (message.fromMe) return;
+
+    const contact = await message.getContact();
+    const chat = await message.getChat();
+
+    const originalMessage = message.body || '';
+    const from = message.from || '';
+    const pushname = contact.pushname || 'Desconocido';
+
+    if (!originalMessage || !from) return;
+
+    // Lógica para manejar la respuesta de la IA (ahora usando el cliente)
+    const aiWhatsappNumber = process.env.AI_WHATSAPP_NUMBER; 
+    if (from === aiWhatsappNumber) {
+        console.log(`Respuesta recibida de la IA: "${originalMessage}"`);
+        if (isAwaitingAIReply && pendingQueryInfo) {
+            const { from: originalFrom, pushname: originalPushname } = pendingQueryInfo;
+            const responseWithSignature = `*Para ${originalPushname}:*\n${originalMessage}`;
+            client.sendMessage(originalFrom, responseWithSignature); // <-- CAMBIO IMPORTANTE
+
+            const contextKey = `${originalFrom}_${originalPushname}`;
+            conversationContext[contextKey] = { lastMessage: originalMessage, timestamp: Date.now() };
+
+            isAwaitingAIReply = false;
+            pendingQueryInfo = null;
+            console.log(`IA ahora está 'disponible'.`);
+        }
+        return;
+    }
+
+    const isGroup = chat.isGroup;
+    const tuNumero = client.info.wid.user; // El bot obtiene su propio número
+
+    console.log(`\n--- NUEVO MENSAJE ---`);
+    console.log(`Recibido de ${pushname} en ${from}: "${originalMessage}"`);
+
+    const fueMencionado = await message.getMentions();
+    const meMencionaron = fueMencionado.some(mention => mention.id.user === tuNumero);
+    const respuestaEspecifica = obtenerRespuestaEspecifica(originalMessage);
+    const esUnSaludoSimple = esSaludo(originalMessage);
+    const contextKey = `${from}_${pushname}`;
+
+    if ((isGroup && gruposPermitidos.includes(from)) || !isGroup) {
+        if (conversationContext[contextKey] && (Date.now() - conversationContext[contextKey].timestamp < CONTEXT_TIMEOUT)) {
+            const history = `Mi última respuesta a ${pushname} fue: "${conversationContext[contextKey].lastMessage}"`;
+            delete conversationContext[contextKey]; 
+            consultarIA_via_WhatsApp(originalMessage, from, pushname, history);
+        } else if (respuestaEspecifica) {
+            console.log("Lógica: Coincidencia con diccionario encontrada.");
+            client.sendMessage(from, respuestaEspecifica); // <-- CAMBIO IMPORTANTE
+            if (isGroup) {
+                enviarEmail("hugo.romero@claro.com.co", `Reporte de '${originalMessage}'`, `Mensaje de ${pushname} en ${from}: ${originalMessage}`);
+            }
+        } else if (meMencionaron) {
+             console.log(`Lógica: Mención para IA detectada de ${pushname}.`);
+            if (isGroup) {
+                enviarEmail("hugo.romero@claro.com.co", `Mención para IA en ${from}`, `Mensaje de ${pushname}: ${originalMessage}`);
+            }
+            consultarIA_via_WhatsApp(originalMessage, from, pushname);
+        } else if (esUnSaludoSimple && puedeSaludar(from, pushname)) {
+            console.log("Lógica: Saludo simple y personalizado detectado.");
+            client.sendMessage(from, obtenerSaludo(pushname)); // <-- CAMBIO IMPORTANTE
+        }
+    }
+});
+
+
+// --- INICIAMOS EL BOT ---
+client.initialize();
+
+
+// --- FUNCIONES DE AYUDA (ADAPTADAS Y SIN CAMBIOS) ---
+
+function consultarIA_via_WhatsApp(userMessage, originalFrom, pushname, conversationHistory = "") {
+    const aiWhatsappNumber = process.env.AI_WHATSAPP_NUMBER;
+    if (!aiWhatsappNumber) {
+        client.sendMessage(originalFrom, "La IA no está configurada correctamente.");
+        return;
+    }
+    if (isAwaitingAIReply) {
+        client.sendMessage(originalFrom, "🧑‍💻 Por favor un momento, estoy con otra consulta.");
+        return;
+    }
+    isAwaitingAIReply = true;
+    pendingQueryInfo = { from: originalFrom, pushname: pushname };
+
+    const prompt = `Actúa como Hugo Romero, un experto en telecomunicaciones. Responde en primera persona y dirígete a tu colega por su nombre. La conversación anterior fue: "${conversationHistory}". Ahora, tu colega '${pushname}' te pregunta: "${userMessage}"`;
+
+    console.log(`Enviando a la IA (${aiWhatsappNumber}): "${prompt}"`);
+    client.sendMessage(aiWhatsappNumber, prompt); // <-- CAMBIO IMPORTANTE
+    
+    if (!conversationHistory) {
+        client.sendMessage(originalFrom, "🤖 Estamos revisando, un momento por favor..."); // <-- CAMBIO IMPORTANTE
+    }
 }
 
 function enviarEmail(to, subject, text) {
@@ -82,23 +191,17 @@ function enviarEmail(to, subject, text) {
 
 function normalizarTexto(texto) {
   if (typeof texto !== 'string') return '';
-  return texto.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return texto.toLowerCase().normalize("NFD").replace(/[\u3000-\u036f]/g, "");
 }
 
 const palabrasSaludo = ["hola", "saludos", "viejo Hugo", "buen dia", "buenas", "buenas tardes", "buenas noches", "buenos dias"];
 
-// MODIFICADO: La función ahora acepta el nombre de la persona para personalizar el saludo.
 function obtenerSaludo(pushname) {
   const hora = new Date().toLocaleString("es-CO", { timeZone: "America/Bogota", hour: "2-digit", hour12: false });
   let saludoBase;
-  if (hora < 12) {
-    saludoBase = "¡Buen día";
-  } else if (hora < 18) {
-    saludoBase = "¡Buenas tardes";
-  } else {
-    saludoBase = "¡Buenas noches";
-  }
-  // Si tenemos un nombre, lo añadimos. Si no, devolvemos el saludo genérico.
+  if (hora < 12) { saludoBase = "¡Buen día"; } 
+  else if (hora < 18) { saludoBase = "¡Buenas tardes"; } 
+  else { saludoBase = "¡Buenas noches"; }
   return pushname && pushname !== 'Desconocido' ? `${saludoBase}, ${pushname}!` : `${saludoBase}!`;
 }
 
@@ -125,124 +228,3 @@ function obtenerRespuestaEspecifica(mensaje) {
   }
   return null;
 }
-
-function esMencionado(message, botNumber) {
-  const normalizedMessage = normalizarTexto(message);
-  const alias = ["backoffice tv colombia 📺📡", "@back tv claro", "hugo_romero"];
-  if (message.includes(`@${botNumber}`)) return true;
-  return alias.some(a => normalizedMessage.includes(normalizarTexto(a)));
-}
-
-function consultarIA_via_WhatsApp(userMessage, originalFrom, pushname, conversationHistory = "") {
-    const aiWhatsappNumber = process.env.AI_WHATSAPP_NUMBER;
-    if (!aiWhatsappNumber) {
-        enviarMensaje(originalFrom, "La IA no está configurada correctamente.");
-        return;
-    }
-    if (isAwaitingAIReply) {
-        enviarMensaje(originalFrom, "🧑‍💻 Por favor un momento, estoy con otra consulta.");
-        return;
-    }
-    isAwaitingAIReply = true;
-    pendingQueryInfo = { from: originalFrom, pushname: pushname };
-
-    const prompt = `Actúa como Hugo Romero, un experto en telecomunicaciones y sistemas operativos. Responde en primera persona y dirígete a tu colega por su nombre. La conversación anterior con esta persona fue: "${conversationHistory}". Ahora, tu colega '${pushname}' te pregunta: "${userMessage}"`;
-
-    console.log(`Enviando a la IA (${aiWhatsappNumber}): "${prompt}"`);
-    enviarMensaje(aiWhatsappNumber, prompt);
-    
-    if (!conversationHistory) {
-        enviarMensaje(originalFrom, "🤖 Estamos revisando, un momento por favor...");
-    }
-}
-
-// --- WEBHOOK ---
-app.post("/webhook", async (req, res) => {
-  try {
-    const body = req.body;
-    if (body.event_type === "message_received" && body.data) {
-
-      if (body.data.fromMe) {
-        return res.status(200).send("EVENT_RECEIVED_AND_IGNORED");
-      }
-
-      const originalMessage = body.data.body || '';
-      const from = body.data.from || '';
-      const pushname = body.data.pushname || 'Desconocido';
-      
-      if (!originalMessage || !from) return res.status(200).send("EVENT_RECEIVED_IGNORED");
-
-      const aiWhatsappNumber = process.env.AI_WHATSAPP_NUMBER;
-      
-      if (from === aiWhatsappNumber) {
-          console.log(`Respuesta recibida de la IA: "${originalMessage}"`);
-          if (isAwaitingAIReply && pendingQueryInfo) {
-              const { from: originalFrom, pushname: originalPushname } = pendingQueryInfo;
-              
-              const responseWithSignature = `*Para ${originalPushname}:*\n${originalMessage}`;
-              enviarMensaje(originalFrom, responseWithSignature);
-
-              const contextKey = `${originalFrom}_${originalPushname}`;
-              conversationContext[contextKey] = {
-                  lastMessage: originalMessage,
-                  timestamp: Date.now()
-              };
-
-              isAwaitingAIReply = false;
-              pendingQueryInfo = null;
-              console.log(`IA ahora está 'disponible'. Contexto guardado para ${originalPushname} en ${originalFrom}.`);
-          }
-          return res.status(200).send("EVENT_RECEIVED");
-      }
-      
-      const isGroup = from.includes("@g.us");
-      const tuNumero = "573134846274"; 
-
-      console.log(`\n--- NUEVO MENSAJE ---`);
-      console.log(`Recibido de ${pushname} en ${from}: "${originalMessage}"`);
-
-      const fueMencionado = esMencionado(originalMessage, tuNumero);
-      const respuestaEspecifica = obtenerRespuestaEspecifica(originalMessage);
-      const esUnSaludoSimple = esSaludo(originalMessage);
-      const contextKey = `${from}_${pushname}`;
-
-      if ((isGroup && gruposPermitidos.includes(from)) || !isGroup) {
-        
-        if (conversationContext[contextKey] && (Date.now() - conversationContext[contextKey].timestamp < CONTEXT_TIMEOUT)) {
-            console.log(`Lógica: Detectada continuación de conversación de ${pushname} para IA.`);
-            const history = `Mi última respuesta a ${pushname} fue: "${conversationContext[contextKey].lastMessage}"`;
-            delete conversationContext[contextKey]; 
-            consultarIA_via_WhatsApp(originalMessage, from, pushname, history);
-        
-        } else if (respuestaEspecifica) {
-            console.log("Lógica: Coincidencia con diccionario encontrada.");
-            enviarMensaje(from, respuestaEspecifica);
-            if (isGroup) {
-                enviarEmail("hugo.romero@claro.com.co", `Reporte de '${originalMessage}'`, `Mensaje de ${pushname} en ${from}: ${originalMessage}`);
-            }
-        
-        } else if (fueMencionado) {
-            console.log(`Lógica: Mención para IA detectada de ${pushname}.`);
-            if (isGroup) {
-                enviarEmail("hugo.romero@claro.com.co", `Mención para IA en ${from}`, `Mensaje de ${pushname}: ${originalMessage}`);
-            }
-            consultarIA_via_WhatsApp(originalMessage, from, pushname);
-        
-        } else if (esUnSaludoSimple && puedeSaludar(from, pushname)) {
-            console.log("Lógica: Saludo simple y personalizado detectado.");
-            // MODIFICADO: Se pasa el 'pushname' para personalizar el saludo.
-            enviarMensaje(from, obtenerSaludo(pushname));
-        }
-      }
-    }
-    res.status(200).send("EVENT_RECEIVED");
-  } catch (err) {
-    console.error("Error fatal en el webhook:", err);
-    res.status(500).send("SERVER_ERROR");
-  }
-});
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Servidor escuchando en el puerto ${PORT}`);
-});
